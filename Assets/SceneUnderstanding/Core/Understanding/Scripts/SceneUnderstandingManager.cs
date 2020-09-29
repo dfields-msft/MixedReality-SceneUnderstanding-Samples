@@ -158,7 +158,7 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
         private readonly object SUDataLock = new object();
         private Guid LatestSceneGuid;
         private Guid LastDisplayedSceneGuid;
-        private bool IsDisplayInProgress = false;
+        private Task displayTask = null;
         [HideInInspector]
         public float TimeElapsedSinceLastAutoRefresh = 0.0f;
         private bool DisplayFromDiskStarted = false;
@@ -219,7 +219,7 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
             }
         }
 
-        private void Update()
+        private async void Update()
         {
             // If the scene is being queried from the device, then allow for autorefresh
             if(QuerySceneFromDevice)
@@ -229,20 +229,31 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
                     TimeElapsedSinceLastAutoRefresh += Time.deltaTime;
                     if(TimeElapsedSinceLastAutoRefresh >= AutoRefreshIntervalInSeconds)
                     {
-                        if(GetLatestSUSceneId() != LastDisplayedSceneGuid)
+                        try
                         {
-                            StartDisplay();
+                            await DisplayDataAsync();
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"Error in {nameof(SceneUnderstandingManager)} {nameof(AutoRefresh)}: {ex.Message}");
                         }
                         TimeElapsedSinceLastAutoRefresh = 0.0f;
                     }
                 }
             }
-            // If the scene is pre-loaded from disk, display it only once, as consecuitve renders
+            // If the scene is pre-loaded from disk, display it only once, as consecutive renders
             // will only bring the same result
             else if(!DisplayFromDiskStarted)
             {
-                StartDisplay();
                 DisplayFromDiskStarted = true;
+                try
+                {
+                    await DisplayDataAsync();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"Error in {nameof(SceneUnderstandingManager)} DisplayFromDisk: {ex.Message}");
+                }
             }
         }
 
@@ -361,29 +372,56 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
         #region Display Data into Unity
 
         /// <summary>
-        /// Start the coroutine that will eventually represent all SU objects into Unity Objects
-        /// in the game world
+        /// Displays the most recently updated SU data as Unity game objects.
         /// </summary>
-        public void StartDisplay()
+        /// <returns>
+        /// A <see cref="Task"/> that represents the operation.
+        /// </returns>
+        public Task DisplayDataAsync()
         {
-            if(IsDisplayInProgress)
+            // See if we already have a running task
+            if ((displayTask != null) && (!displayTask.IsCompleted))
             {
-                Debug.Log("SceneUnderstandingManager.StartDisplay: Display is already in progress.");
-                return;
+                // Yes we do. Return the already running task.
+                Debug.Log($"{nameof(SceneUnderstandingManager)}.{nameof(DisplayDataAsync)} already in progress.");
+                return displayTask;
             }
 
-            IsDisplayInProgress = true;
-            StartCoroutine(DisplayData());
+            // If we've displayed at least once and nothing has changed since last display, there is no new work to do
+            else if ((LastDisplayedSceneGuid != Guid.Empty) && (GetLatestSUSceneId() == LastDisplayedSceneGuid))
+            {
+                Debug.Log($"{nameof(SceneUnderstandingManager)}.{nameof(DisplayDataAsync)} nothing has changed since last display.");
+                return Task.CompletedTask;
+            }
 
-            // Run Callbacks for On Load Started
-            OnLoadStarted.Invoke();
+            // We have real work to do. Time to start the coroutine and track it.
+            else
+            {
+                // Create a completion source
+                TaskCompletionSource<bool> completionSource = new TaskCompletionSource<bool>();
+
+                // Store the task
+                displayTask = completionSource.Task;
+
+                // Run Callbacks for On Load Started
+                OnLoadStarted.Invoke();
+
+                // Start the coroutine and pass in the completion source
+                StartCoroutine(DisplayDataRoutine(completionSource));
+
+                // Return the newly running task
+                return displayTask;
+            }
         }
 
         /// <summary>
         /// This coroutine will deserialize the latest SU data, either queried from the device
         /// or from disk and use it to create Unity Objects that represent that geometry
         /// </summary>
-        private IEnumerator DisplayData()
+        /// <param name="completionSource">
+        /// The <see cref="TaskCompletionSource{TResult}"/> that can be used to signal the coroutine is complete.
+        /// </param>
+        private IEnumerator DisplayDataRoutine(TaskCompletionSource<bool> completionSource)
         {
             Debug.Log("SceneUnderstandingManager.DisplayData: About to display the latest set of Scene Objects");
             SceneUnderstanding.Scene suScene = null;
@@ -417,12 +455,20 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
                 try
                 {
                     suScene = SceneUnderstanding.Scene.FromFragments(sceneFragments);
+                    lock (SUDataLock)
+                    {
+                        // Store new GUID for data loaded
+                        LatestSceneGuid = Guid.NewGuid();
+                        LastDisplayedSceneGuid = LatestSceneGuid;
+                    }
                 }
-                catch
+                catch (Exception inner)
                 {
-                    Debug.LogWarning("Scene from PC path couldn't be loaded, verify scene fragments are not null and that they all come from the same scene");
+                    // Wrap the exception
+                    Exception outer = new FileLoadException("Scene from PC path couldn't be loaded, verify scene fragments are not null and that they all come from the same scene.", inner);
+                    Debug.LogWarning(outer.Message);
+                    completionSource.SetException(outer);
                 }
-
             }
 
             if(suScene != null)
@@ -434,8 +480,8 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
                 // Allow from one frame to yield the coroutine back to the main thread
                 yield return null;
 
-                // Retreive a transformation matrix that will allow us orient the Scene Understanding Objects into
-                // their correct correspoding position in the unity world
+                // Retrieve a transformation matrix that will allow us orient the Scene Understanding Objects into
+                // their correct corresponding position in the unity world
                 System.Numerics.Matrix4x4 sceneToUnityTransformAsMatrix4x4 = GetSceneToUnityTransformAsMatrix4x4(suScene);
 
                 if(sceneToUnityTransformAsMatrix4x4 != null)
@@ -452,7 +498,7 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
 
 
                     // After the scene has been oriented, loop through all the scene objects and
-                    // generate their correspoding Unity Object
+                    // generate their corresponding Unity Object
                     IEnumerable<SceneUnderstanding.SceneObject> sceneObjects = suScene.SceneObjects;
 
                     int i = 0;
@@ -470,10 +516,13 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
                 }
 
                 // When all objects have been loaded, finish.
-                IsDisplayInProgress = false;
                 Debug.Log("SceneUnderStandingManager.DisplayData: Display Completed");
+
                 // Run CallBacks for Onload Finished
                 OnLoadFinished.Invoke();
+
+                // Let the task complete
+                completionSource.SetResult(true);
             }
         }
 
