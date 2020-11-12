@@ -156,14 +156,14 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
             // Considering that device is currently not supported in the editor means that
             // if the application is running in the editor it is for sure running on PC and
             // not a device. this assumption, for now, is always true.
-            RunOnDevice = !Application.isEditor;
+            RunOnDevice = true;// !Application.isEditor;
 
             if(QuerySceneFromDevice)
             {
                 // Figure out if the application is setup to allow querying a scene from device
 
                 // The app must not be running in the editor
-                if(Application.isEditor)
+                if(false && Application.isEditor)
                 {
                     Debug.LogError("SceneUnderstandingManager.Start: Running in editor while quering scene from a device is not supported.\n" +
                                    "To run on editor disable the 'RunOnDevice' Flag in the SceneUnderstandingManager Component");
@@ -308,10 +308,15 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
 
                 // Ensure that the bounding radius is within the min/max range.
                 boundingSphereRadiusInMeters = Mathf.Clamp(boundingSphereRadiusInMeters, MinBoundingSphereRadiusInMeters, MaxBoundingSphereRadiusInMeters);
-                
+
+                Debug.Log("SceneUnderstandingManager.RetrieveData: Beginning ComputeSerializedAsync...");
+
                 // Make sure the scene query has completed swap with latestSUSceneData under lock to ensure the application is always pointing to a valid scene.
                 SceneBuffer serializedScene = SceneUnderstanding.SceneObserver.ComputeSerializedAsync(querySettings, boundingSphereRadiusInMeters).GetAwaiter().GetResult();
-                lock(SUDataLock)
+
+                Debug.Log("SceneUnderstandingManager.RetrieveData: ComputeSerializedAsync complete.");
+
+                lock (SUDataLock)
                 {
                     // The latest data queried from the device is stored in these variables
                     LatestSUSceneData = new byte[serializedScene.Size];
@@ -372,7 +377,14 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
                 // Get Latest Scene and Deserialize it
                 // Scenes Queried from a device are Scenes composed of one Scene Fragment
                 SceneFragment sceneFragment = GetLatestSceneSerialization();
-                SceneFragment [] sceneFragmentsArray = new SceneFragment[1] {sceneFragment};
+                while (sceneFragment == null)
+                {
+                    yield return null;
+                    sceneFragment = GetLatestSceneSerialization();
+                }
+                Debug.Log("SceneUnderstandingManager.DisplayData: Loaded a scene fragment");
+
+                SceneFragment[] sceneFragmentsArray = new SceneFragment[1] {sceneFragment};
                 suScene = SceneUnderstanding.Scene.FromFragments(sceneFragmentsArray);
                 
                 // Get Latest Scene GUID
@@ -416,12 +428,12 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
 
                 // Retreive a transformation matrix that will allow us orient the Scene Understanding Objects into
                 // their correct correspoding position in the unity world
-                System.Numerics.Matrix4x4 sceneToUnityTransformAsMatrix4x4 = GetSceneToUnityTransformAsMatrix4x4(suScene);
+                System.Numerics.Matrix4x4? sceneToUnityTransformAsMatrix4x4 = GetSceneToUnityTransformAsMatrix4x4(suScene);
 
                 if(sceneToUnityTransformAsMatrix4x4 != null)
                 {
                     // Using the transformation matrix generated above, port its values into the tranform of the scene root (Numerics.matrix -> GameObject.Transform)
-                    SetUnityTransformFromMatrix4x4(SceneRoot.transform, sceneToUnityTransformAsMatrix4x4, RunOnDevice);
+                    SetUnityTransformFromMatrix4x4(SceneRoot.transform, sceneToUnityTransformAsMatrix4x4.Value, RunOnDevice);
 
                     if(!RunOnDevice)
                     {
@@ -916,7 +928,7 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
         /// from the Scene Understanding Coordinate System to the Unity one
         /// </summary>
         /// <param name="scene"> Scene from which to get the Scene Understanding Coordinate System </param>
-        private System.Numerics.Matrix4x4 GetSceneToUnityTransformAsMatrix4x4(SceneUnderstanding.Scene scene)
+        private System.Numerics.Matrix4x4? GetSceneToUnityTransformAsMatrix4x4(SceneUnderstanding.Scene scene)
         {
             System.Numerics.Matrix4x4? sceneToUnityTransform = System.Numerics.Matrix4x4.Identity;
 
@@ -938,7 +950,7 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
                 }
             }
 
-            return sceneToUnityTransform.Value;
+            return sceneToUnityTransform;
         }
 
         /// <summary>
@@ -1097,11 +1109,11 @@ namespace Microsoft.MixedReality.SceneUnderstanding.Samples.Unity
 
                 if(suScene != null)
                 {
-                    System.Numerics.Matrix4x4 sceneToUnityTransformAsMatrix4x4 = GetSceneToUnityTransformAsMatrix4x4(suScene);
+                    System.Numerics.Matrix4x4? sceneToUnityTransformAsMatrix4x4 = GetSceneToUnityTransformAsMatrix4x4(suScene);
 
                     if(sceneToUnityTransformAsMatrix4x4 != null)
                     {
-                        SetUnityTransformFromMatrix4x4(SceneRoot.transform, sceneToUnityTransformAsMatrix4x4, RunOnDevice);
+                        SetUnityTransformFromMatrix4x4(SceneRoot.transform, sceneToUnityTransformAsMatrix4x4.Value, RunOnDevice);
 
                         if(!RunOnDevice)
                         {
